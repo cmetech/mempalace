@@ -93,7 +93,23 @@ class KnowledgeGraph:
             CREATE INDEX IF NOT EXISTS idx_triples_predicate ON triples(predicate);
             CREATE INDEX IF NOT EXISTS idx_triples_valid ON triples(valid_from, valid_to);
         """)
+        self._migrate_schema(conn)
         conn.commit()
+
+    def _migrate_schema(self, conn):
+        """Backwards-compatible schema migration for older triples tables.
+
+        RFC 002 §5.5 adds two optional provenance columns so adapter-written
+        triples can be traced back to (a) the specific drawer that produced
+        them and (b) the adapter that authored them. Older palaces predate
+        these columns; SQLite has no ``ADD COLUMN IF NOT EXISTS``, so we
+        introspect the schema first and only issue the ALTER if needed.
+        """
+        existing = {row["name"] for row in conn.execute("PRAGMA table_info(triples)")}
+        if "source_drawer_id" not in existing:
+            conn.execute("ALTER TABLE triples ADD COLUMN source_drawer_id TEXT")
+        if "adapter_name" not in existing:
+            conn.execute("ALTER TABLE triples ADD COLUMN adapter_name TEXT")
 
     def _conn(self):
         if self._connection is None:
@@ -137,9 +153,15 @@ class KnowledgeGraph:
         confidence: float = 1.0,
         source_closet: str = None,
         source_file: str = None,
+        source_drawer_id: str = None,
+        adapter_name: str = None,
     ):
         """
         Add a relationship triple: subject → predicate → object.
+
+        ``source_drawer_id`` and ``adapter_name`` are RFC 002 §5.5 provenance
+        fields populated by adapters that advertise ``supports_kg_triples``;
+        they default to ``None`` so every existing caller stays source-compatible.
 
         Examples:
             add_triple("Max", "child_of", "Alice", valid_from="2015-04-01")
@@ -173,8 +195,12 @@ class KnowledgeGraph:
                 triple_id = f"t_{sub_id}_{pred}_{obj_id}_{hashlib.sha256(f'{valid_from}{datetime.now().isoformat()}'.encode()).hexdigest()[:12]}"
 
                 conn.execute(
-                    """INSERT INTO triples (id, subject, predicate, object, valid_from, valid_to, confidence, source_closet, source_file)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    """INSERT INTO triples (
+                        id, subject, predicate, object,
+                        valid_from, valid_to, confidence,
+                        source_closet, source_file,
+                        source_drawer_id, adapter_name
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                     (
                         triple_id,
                         sub_id,
@@ -185,6 +211,8 @@ class KnowledgeGraph:
                         confidence,
                         source_closet,
                         source_file,
+                        source_drawer_id,
+                        adapter_name,
                     ),
                 )
         return triple_id
